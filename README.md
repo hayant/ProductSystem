@@ -1,87 +1,163 @@
-# Product management system — smoke test
+# Product management system
 
-A minimal vertical slice demonstrating the four-part architecture:
+A small product-management system split across four parts — three in this
+repository, one in a sister repository:
 
-- **Frontend** (React + Vite) — `src/frontend`
-- **Backend API** (ASP.NET Core minimal API) — `src/ProductSystem.Api`
-- **Database** (EF Core in-memory) — configured in both host projects
-- **ERP sync worker** (.NET Worker) — `src/ProductSystem.Worker`
-- **Shared domain** (`ProductService`, `Product`, `DbContext`) — `src/ProductSystem.Shared`
+- **Frontend** (React + TypeScript, Vite) — `src/frontend`
+- **Backend API** (ASP.NET Core minimal API, `net10.0`) — `src/ProductSystem.Api`
+- **Shared domain** (`Product`, `ProductDbContext`, `ProductService`; EF Core 8
+  against SQL Server, `net8.0`) — `src/ProductSystem.Shared`
+- **ERP sync worker** — `ProductSystem.Integration`, a **separate repository**
+  (`../ProductSystem.Integration`). It does *not* reference Shared; it consumes
+  this API over HTTP via its `ProductsApiClient`, and reaches the ERP only
+  through its `IErpClient` abstraction.
 
 ## The architectural point this code is making
 
-Both the API and the Worker depend on `ProductSystem.Shared` and go through
-`ProductService` for every write. There is no second path to the database.
-That single rule is what keeps validation, uniqueness checks, and invariants
-in one place rather than duplicated across two entry points.
+Every product write goes through `ProductService` in `ProductSystem.Shared`.
+The API calls it directly; the Integration worker goes through the API over
+HTTP, so it ends up in the same place. There is deliberately **no second path
+to the database** — validation, SKU uniqueness, and other invariants live in
+exactly one place rather than duplicated across entry points. Adding
+update/delete endpoints means adding methods to `ProductService` first, then
+thin HTTP mappings in `Program.cs`.
 
-The ERP is only reachable through `IErpClient`. Anywhere else in the code
-calling the ERP directly would be a review-flagging smell — the abstraction
-is the translation boundary where the ERP's data shape becomes our domain shape.
+In the Integration repo, the ERP is only reachable through `IErpClient`.
+Anywhere else calling the ERP directly would be a review-flagging smell — the
+abstraction is the translation boundary where the ERP's data shape becomes our
+domain shape.
 
 ## Running it
 
-Prerequisites: .NET 8 SDK, Node 18+.
+Prerequisites: .NET 10 SDK (the API targets `net10.0`; Shared targets
+`net8.0`), Node 18+, and a reachable SQL Server instance.
+
+### 1. Configure the database connection
+
+The API **fails at startup** if `ConnectionStrings:ProductSystem` is not
+configured — fail loudly rather than discover it on the first request. Set it
+via User Secrets locally:
 
 ```bash
-# 1. Start the API (terminal 1)
 cd src/ProductSystem.Api
-dotnet run
-# -> http://localhost:5080
+dotnet user-secrets set "ConnectionStrings:ProductSystem" \
+  "Server=localhost;Database=ProductSystem;Integrated Security=true;TrustServerCertificate=True"
+```
 
-# 2. Start the frontend (terminal 2)
+(or the `ConnectionStrings__ProductSystem` environment variable). Pending EF
+migrations are applied automatically on startup.
+
+### 2. Start the API
+
+```bash
+dotnet run --project src/ProductSystem.Api
+# -> http://localhost:5080
+```
+
+### 3. Start the frontend
+
+```bash
 cd src/frontend
 npm install
 npm run dev
 # -> http://localhost:5173
+```
 
-# 3. Run the worker to sync a few products from the fake ERP (terminal 3)
-#    Note: because the DB is in-memory and per-process, running the worker
-#    as a separate process gives it its OWN database. For the smoke test,
-#    create products via the UI to see them there; run the worker to see
-#    its sync output in the console.
-cd src/ProductSystem.Worker
-dotnet run
+`.env.development` provides `VITE_API_BASE` and `VITE_API_KEY` for local dev.
+These are baked into the bundle at build time and are **public configuration,
+not secrets** (the `X-Api-Key` value is visible in DevTools). Local overrides
+go in `.env.local` (gitignored).
+
+### 4. Run the ERP sync (optional)
+
+Clone and run `ProductSystem.Integration` (sister repo); point its
+`ProductsApiClient` configuration at this API.
+
+## API surface
+
+Endpoints live under the versioned prefix `/api/v1`:
+
+- `GET /api/v1/products` — list products
+- `POST /api/v1/products` — create a product
+- `GET /health` — health check (includes a database ping), unauthenticated
+
+### Authentication
+
+Every request (except `/health`) must carry the correct `X-Api-Key` header,
+enforced by `ApiKeyMiddleware` (constant-time comparison; returns 500 if the
+key was never configured — fail loudly rather than silently open). The dev key
+(`dev-smoke-test-key`) is committed in `appsettings.Development.json` and
+`frontend/.env.development` on purpose.
+
+Two pipeline-ordering rules in `Program.cs`:
+
+- `UseCors()` runs **before** the API key middleware so browser preflight
+  (OPTIONS) requests are answered.
+- `/health` is mapped before, and also explicitly skipped inside, the
+  middleware: App Service probes it unauthenticated, and a 401 would mark the
+  instance unhealthy.
+
+CORS origins and the API key come from config (`Cors:AllowedOrigins`,
+`ApiAuth:ApiKey`) so the binary is environment-independent.
+
+### Error contract
+
+The API returns structured error bodies the frontend renders:
+
+- validation failures → `400 { error: "validation_failed", message }`
+- SKU conflicts → `409 { error: "duplicate_sku", message, sku }`
+
+`src/frontend/src/api.ts` is the single place HTTP concerns live on the
+client — components only see its clean async functions.
+
+## Domain conventions
+
+- `Product` is created via the static `Product.Create` factory (private
+  setters, parameterless ctor only for EF); validation lives in the entity.
+- Optimistic concurrency via `RowVersion` (`IsRowVersion()` — real against
+  SQL Server).
+- `Sku` has a unique index; `ProductService.CreateAsync` also pre-checks and
+  throws `DuplicateSkuException` for a clean error (the index is the last line
+  of defence).
+- `ExternalId` is the ERP's identifier for a product, nullable so
+  locally-created products can exist before outbound sync.
+- DTOs in `Program.cs` are separate records — never serialize the domain
+  entity over HTTP.
+
+## Migrations
+
+Shared owns the model; Api is the startup project:
+
+```bash
+ConnectionStrings__ProductSystem="Server=localhost;Database=DesignTime;Integrated Security=true;TrustServerCertificate=True" \
+  dotnet ef migrations add <Name> -p src/ProductSystem.Shared -s src/ProductSystem.Api -o Migrations
 ```
 
 ## What's deliberately missing (and how it would be added)
 
-- **Update/delete endpoints** — would go in `ProductService` alongside `CreateAsync`,
-  with optimistic concurrency already wired via `RowVersion`.
-- **Outbound sync (local → ERP)** — mirror of `RunInboundAsync`, querying
-  products where `UpdatedAt > outboundWatermark` and calling a
-  `PushProductAsync` method on `IErpClient`.
-- **Persistent watermark** — a `SyncState` table instead of a hard-coded
-  `DateTime.UtcNow.AddDays(-7)`.
-- **Real database** — swap `UseInMemoryDatabase` for `UseSqlServer` with a
-  connection string from config. The row version already behaves correctly
-  against SQL Server.
-- **Scheduler** — replace the run-once-and-exit worker with either a
-  `BackgroundService` using `PeriodicTimer`, or an external scheduler
-  (Kubernetes CronJob, Quartz.NET) triggering the binary.
-- **Sync run audit table** — `sync_runs` with start/end/counts for
-  observability and alerting on missed or degraded runs.
+- **Update/delete endpoints** — would go in `ProductService` alongside
+  `CreateAsync`, with optimistic concurrency already wired via `RowVersion`.
 - **Tests** — unit tests around `ProductService` (easy, since it takes a
-  `DbContext` that can be an in-memory one) and contract tests against a
-  fake or sandbox ERP.
+  `DbContext` that can be an in-memory one) and, in the Integration repo,
+  contract tests against a fake or sandbox ERP.
 
 ## Project layout
 
 ```
 ProductSystem.sln
 src/
-├── ProductSystem.Shared/      domain + DbContext + ProductService
+├── ProductSystem.Shared/      domain + DbContext + ProductService (net8.0)
 │   ├── Domain/Product.cs
 │   ├── Data/ProductDbContext.cs
-│   └── Services/ProductService.cs
-├── ProductSystem.Api/         HTTP layer only — no business logic
-│   └── Program.cs
-├── ProductSystem.Worker/      ERP integration
-│   ├── Erp/IErpClient.cs      (+ FakeErpClient)
-│   ├── Sync/SyncService.cs
+│   ├── Services/ProductService.cs
+│   └── Migrations/
+├── ProductSystem.Api/         HTTP layer only — no business logic (net10.0)
+│   ├── Middleware/ApiKeyMiddleware.cs
 │   └── Program.cs
 └── frontend/                  React + Vite
     └── src/
         ├── api.ts             isolated HTTP client
         └── App.tsx            list + create form
+
+../ProductSystem.Integration/  ERP sync worker (separate repository)
 ```
