@@ -1,0 +1,61 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2868
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+
+\f0\fs24 \cf0 Integration table:\
+- Id (int not nullable, primary key)\
+- Name (string not nullable, integration name)\
+- Active (bit not nullable, true or false, indicates whether the integration is possible to run)\
+- FetchFrom (string nullable, API endpoint where the data is fetched\
+- PostTo (string nullable, API endpoint where the data is sent)\
+- RunInterval (int nullable, scheduled run interval in seconds, when null scheduling is not in use)\
+- UserRunnable (bit not nullable, true or false, indicates whether the integration is user runnable)\
+- ConversionScript (string nullable, conversion script used to convert incoming data to application format)\
+- LastScheduledRun (datetime nullable, shows the last scheduled run start time)\
+- NextScheduledRun (datetime nullable, shows the next scheduled run time, calculated by adding the RunInterval to LastScheduledRun)\
+- LastUserRun (datetime nullable, shows the last user run start time)\
+- RunMode (enum not nullable, parallel / serial / conditional)\
+\
+IntegrationGroup table:\
+- ParentIntegrationId -> (int not nullable primary key, foreign key -> Integration.Id)\
+- IntegrationId -> (int not nullable primary key, foreign key -> Integration.Id)\
+- Position (int not nullable primary key, shows the order number of the integration in the integration group in question)\
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+\cf0 - RunMode (enum not nullable, parallel / serial / conditional)\
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+\cf0 \
+RunLog table:\
+- Id (int not nullable, primary key)\
+- IntegrationId (int not nullable, foreign key -> Integration.Id)\
+- GroupIntegrationId (int nullable, foreign key -> Integration.Id\
+- RunType (enum not nullable, user / scheduled)\
+- RunStart (datetime nullable, run start time)\
+- RunStop (datetime nullable, run stop time)\
+- Status (enum not nullable, queued / running / finished / failed)\
+\
+RunStatus table:\
+- Id (int not nullable, primary key)\
+- RunLogId -> (int not nullable, foreign key -> RunLog.Id)\
+- TimeStamp (datetime not nullable, time stamp of the current row)\
+- Message (string not nullable, message)\
+\
+Condition table:\
+- IntegrationId (int not nullable, foreign key -> Integration.Id)\
+- BlockingIntegrationId (int not nullable, foreign key -> Integration.Id)\
+\
+\
+General specs:\
+- Migrations should be applied every time the integration engine is started.\
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+\cf0 - Poll Integration table to check possible configuration changes. Poll interval should be configurable, defaulted to 60 seconds.\
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+\cf0 - Integration engine should be running in a waiting / worker loop, which polls RunLog to see if there are any queued runs waiting to be started. Poll interval should be configurable, defaulted to 10 seconds.\
+\
+Initial steps:\
+1. Split the ProductSystem.Worker to a separate IntegrationService solution.\
+2. Configure EF migrations and create the initial migration based on the schema description. Schema name should be ProductSystem.Integration.\
+\
+}
